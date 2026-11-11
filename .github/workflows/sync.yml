@@ -1,0 +1,162 @@
+name: Sync & Release Misc Unicode
+
+on:
+  # push:
+  #   branches:
+  #     - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ vars.VERSION }}
+  cancel-in-progress: false
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      # USER: ${{ github.repository_owner }}
+      VERSION: ${{ vars.VERSION }}
+      PATH_DATA: dist
+
+    steps:
+      # 1. Checkout
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      # 2. Check Release and Tag
+      - name: Check Release and Tag
+        id: check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${VERSION:-}" ]]; then
+            echo "::error::VERSION is empty."
+            exit 1
+          fi
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid VERSION: $VERSION"
+            exit 1
+          fi
+
+          TAG="v${VERSION}"
+
+          echo "Checking version: ${VERSION}"
+          echo "Checking tag: ${TAG}"
+
+          # Fetch remote tags
+          git fetch origin --tags --force
+
+          # Release already exists: stop all subsequent steps
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "mode=skip" >> "$GITHUB_OUTPUT"
+            echo "Release ${TAG} already exists."
+            echo "Nothing to do."
+            exit 0
+          fi
+
+          # Tag exists but Release does not:
+          # publish Release directly without downloading or modifying data
+          if git ls-remote --exit-code --tags origin \
+            "refs/tags/${TAG}" >/dev/null 2>&1; then
+
+            echo "mode=release" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG} exists, but Release does not."
+            echo "Ready to publish Release."
+
+          else
+
+            echo "mode=sync" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG} does not exist."
+            echo "Ready to download and synchronize data."
+
+          fi
+
+      # 3. Validate Branch
+      - name: Validate Branch
+        if: steps.check.outputs.mode == 'sync'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF_TYPE" != "branch" ]]; then
+            echo "::error::Data synchronization must run from a branch."
+            exit 1
+          fi
+
+      # 4. Download Data
+      - name: Download Data
+        if: steps.check.outputs.mode == 'sync'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${1:-17.0.0}"
+          PATH_DATA="${2:-temp}"
+
+          OUTPUT_DIR="${PATH_DATA}/${VERSION}"
+          BASE_URL="https://www.unicode.org/Public/${VERSION}/"
+
+          # charts, ucd, ucdxml
+          DIRS=("emoji" "idna" "linkification" "security" "uca")
+          FILE_PATTERN="*.txt"
+
+          mkdir -p "$OUTPUT_DIR"
+          pushd "$OUTPUT_DIR"
+          echo "Unicode version : ${VERSION}"
+
+          INCLUDE_DIRS=()
+          for dir in "${DIRS[@]}"; do
+              INCLUDE_DIRS+=("/Public/${VERSION}/${dir}")
+          done
+
+          INCLUDE_PATHS=$(IFS=,; echo "${INCLUDE_DIRS[*]}")
+
+          wget \
+              --recursive \
+              --level=inf \
+              --no-parent \
+              --no-host-directories \
+              --cut-dirs=2 \
+              --continue \
+              --no-verbose \
+              --accept="${FILE_PATTERN}" \
+              --include-directories="${INCLUDE_PATHS}" \
+              --reject="index.html*" \
+              "$BASE_URL"
+
+          echo
+          echo "Download completed: ${OUTPUT_DIR}"
+          popd
+
+          # Clean old data
+          find . -mindepth 1 -maxdepth 1 \
+              ! -name '.git' \
+              ! -name '.github' \
+              ! -name '.gitignore' \
+              ! -name "$PATH_DATA" \
+              -exec rm -rf -- {} +
+
+          cp -a "${OUTPUT_DIR}/." ./
+
+          echo "Done"
+
+      - name: Git auto commit
+        uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          commit_user_name: "github-actions[bot]"
+          commit_user_email: "41898282+github-actions[bot]@users.noreply.github.com"
+          commit_author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          commit_message: "Update Unicode data ${{ env.VERSION }}"
+          tag_name: "v${{ env.VERSION }}"

@@ -4,8 +4,11 @@
 # linux
 *~
 
-# ide
-temp/
-dist/
+# misc
 *.gz
 *.zip
+*.sh
+robots.txt
+
+temp/
+dist/
